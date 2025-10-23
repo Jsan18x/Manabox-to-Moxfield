@@ -445,6 +445,10 @@ function ManaboxToMoxfield() {
                 ℹ️ Nota: Si Manabox te exporta archivos .txt en lugar de .csv, ¡no hay problema! La herramienta acepta ambos formatos.
               </p>
             </div>
+              <p className="mt-3 text-xs text-slate-400">
+                ℹ️ Nota: Si Manabox te exporta archivos .txt en lugar de .csv, ¡no hay problema! La herramienta acepta ambos formatos.
+              </p>
+            </div>
 
             {!cardDatabase && (
               <div className="bg-blue-900/30 border border-blue-700 rounded-lg p-4 space-y-4">
