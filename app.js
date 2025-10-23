@@ -12,6 +12,84 @@ function ManaboxToMoxfield() {
   const [downloadLinks, setDownloadLinks] = useState([]);
   const [cardNameIndex, setCardNameIndex] = useState(null);
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
+  const [dbLoading, setDbLoading] = useState(false);
+
+  const loadScryfallDatabaseAuto = async () => {
+    setDbLoading(true);
+    setError('');
+    setProgress('Conectando con Scryfall...');
+    
+    try {
+      const bulkResponse = await fetch('https://api.scryfall.com/bulk-data');
+      
+      if (!bulkResponse.ok) {
+        throw new Error('No se pudo conectar con Scryfall');
+      }
+      
+      const bulkData = await bulkResponse.json();
+      const defaultCards = bulkData.data.find(item => item.type === 'default_cards');
+      
+      if (!defaultCards) {
+        throw new Error('No se pudo encontrar la base de datos de cartas');
+      }
+      
+      setProgress('Descargando base de datos completa... esto puede tardar 1-2 minutos (~500MB)');
+      
+      const cardsResponse = await fetch(defaultCards.download_uri);
+      
+      if (!cardsResponse.ok) {
+        throw new Error('Error al descargar la base de datos');
+      }
+      
+      setProgress('Procesando base de datos...');
+      const cardsData = await cardsResponse.json();
+      
+      const colorMap = {};
+      const nameIndex = {};
+      const collectorIndex = {};
+      
+      console.log('📚 Iniciando indexación automática de base de datos...');
+      
+      cardsData.forEach((card, index) => {
+        if (card.id && card.color_identity !== undefined) {
+          colorMap[card.id] = card.color_identity;
+        }
+        
+        if (card.name && card.set) {
+          const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
+          nameIndex[key] = card.color_identity || [];
+        }
+        
+        if (card.set && card.collector_number) {
+          const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
+          collectorIndex[collectorKey] = {
+            color_identity: card.color_identity || [],
+            name: card.name
+          };
+        }
+        
+        if (index % 20000 === 0 && index > 0) {
+          console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
+        }
+      });
+      
+      console.log('✅ Indexación automática completada:');
+      console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+      console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
+      console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
+      
+      setCardDatabase(colorMap);
+      setCardNameIndex(nameIndex);
+      setCardCollectorIndex(collectorIndex);
+      setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+      setDbLoading(false);
+      
+    } catch (err) {
+      setError(`No se pudo descargar automáticamente: ${err.message}. Por favor usa la Opción B (Carga Manual).`);
+      setDbLoading(false);
+      setProgress('');
+    }
+  };
 
   const handleDatabaseUpload = async (event) => {
     const dbFile = event.target.files[0];
