@@ -435,7 +435,7 @@ function ManaboxToMoxfield() {
             <div className="bg-slate-700 rounded-lg p-4 space-y-2 text-sm text-slate-300">
               <h3 className="font-semibold text-white">Cómo usar:</h3>
               <ol className="space-y-2 ml-4 list-decimal">
-                <li>Descarga la base de datos de Scryfall y súbela aquí</li>
+                <li>Carga la base de datos (automática o manual)</li>
                 <li>Selecciona tu archivo de Manabox (CSV o TXT)</li>
                 <li>Haz clic en "Convertir y Descargar"</li>
                 <li>Descarga cada archivo CSV por color</li>
@@ -452,34 +452,65 @@ function ManaboxToMoxfield() {
                   <i data-lucide="database" className="w-5 h-5 text-blue-400 flex-shrink-0 mt-0.5"></i>
                   <div className="flex-1">
                     <h3 className="text-blue-200 font-semibold mb-2">Paso 1: Cargar base de datos de Scryfall</h3>
+                    <p className="text-blue-300 text-sm mb-4">
+                      Elige una de las dos opciones para cargar la base de datos:
+                    </p>
                     
-                    <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
-                      <div className="flex items-center gap-2 mb-2">
-                        <i data-lucide="upload" className="w-4 h-4 text-green-400"></i>
-                        <h4 className="text-white font-semibold text-sm">Carga Manual</h4>
+                    <div className="space-y-3">
+                      {/* Opción Automática */}
+                      <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
+                        <div className="flex items-center gap-2 mb-2">
+                          <i data-lucide="zap" className="w-4 h-4 text-yellow-400"></i>
+                          <h4 className="text-white font-semibold text-sm">Opción A: Descarga Automática (Recomendado)</h4>
+                        </div>
+                        <p className="text-slate-300 text-xs mb-3">
+                          Descarga la base de datos directamente desde Scryfall. Requiere buena conexión a internet.
+                        </p>
+                        <button
+                          onClick={loadScryfallDatabaseAuto}
+                          disabled={dbLoading}
+                          className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 text-sm"
+                        >
+                          <i data-lucide="zap" className="w-4 h-4"></i>
+                          {dbLoading ? 'Descargando...' : 'Descargar Automáticamente'}
+                        </button>
                       </div>
-                      <p className="text-slate-300 text-xs mb-2">
-                        Descarga el archivo manualmente desde Scryfall:
-                      </p>
-                      <a 
-                        href="https://scryfall.com/docs/api/bulk-data"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-2 text-blue-300 hover:text-blue-200 text-xs mb-3"
-                      >
-                        <i data-lucide="external-link" className="w-3 h-3"></i>
-                        Ir a Scryfall (busca "Default Cards")
-                      </a>
-                      <label className="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer text-sm">
-                        <i data-lucide="upload" className="w-4 h-4"></i>
-                        Subir Archivo JSON
-                        <input
-                          type="file"
-                          accept=".json"
-                          onChange={handleDatabaseUpload}
-                          className="hidden"
-                        />
-                      </label>
+                      
+                      {/* Opción Manual */}
+                      <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
+                        <div className="flex items-center gap-2 mb-2">
+                          <i data-lucide="upload" className="w-4 h-4 text-green-400"></i>
+                          <h4 className="text-white font-semibold text-sm">Opción B: Carga Manual</h4>
+                        </div>
+                        <p className="text-slate-300 text-xs mb-2">
+                          Si la descarga automática no funciona, descarga el archivo manualmente:
+                        </p>
+                        <ol className="text-slate-300 text-xs mb-3 ml-4 space-y-1 list-decimal">
+                          <li>Haz clic en el enlace de abajo</li>
+                          <li>Busca "Default Cards" en la tabla</li>
+                          <li>Haz clic en "Download" para descargar el JSON</li>
+                          <li>Sube el archivo aquí</li>
+                        </ol>
+                        <a 
+                          href="https://scryfall.com/docs/api/bulk-data"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-2 text-blue-300 hover:text-blue-200 text-xs mb-3 underline"
+                        >
+                          <i data-lucide="external-link" className="w-3 h-3"></i>
+                          Abrir página de descargas de Scryfall
+                        </a>
+                        <label className="w-full bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer text-sm mt-3">
+                          <i data-lucide="upload" className="w-4 h-4"></i>
+                          Subir Archivo JSON Descargado
+                          <input
+                            type="file"
+                            accept=".json"
+                            onChange={handleDatabaseUpload}
+                            className="hidden"
+                          />
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>
