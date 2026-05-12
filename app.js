@@ -1,80 +1,64 @@
 const { useState } = React;
 const { Upload, Download, AlertCircle, CheckCircle, Database, ExternalLink } = lucide;
 
-// ─── Lógica compartida de parser incremental ──────────────────────────────────
-// Procesa un ReadableStream de texto en chunks, extrae objetos JSON uno a uno.
-async function parseCardsStream(stream, totalBytes, onProgress) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder('utf-8');
+// Cede el hilo al browser para que no se congele la pestaña
+const yieldToMain = () => new Promise(resolve => setTimeout(resolve, 0));
 
-  let received = 0;
-  let buffer = '';
-  let depth = 0;
-  let inString = false;
-  let escape = false;
-  let objectStart = -1;
-  let started = false;
+// Extrae solo los campos que necesitamos de cada carta (evita parsear el objeto completo)
+// Busca "color_identity", "id", "name", "set", "collector_number" con regex simple
+function extractCardFields(jsonStr) {
+  try {
+    const card = JSON.parse(jsonStr);
+    return {
+      id: card.id,
+      name: card.name,
+      set: card.set,
+      collector_number: card.collector_number,
+      color_identity: card.color_identity
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Procesa un bloque de texto buscando objetos JSON completos de nivel raíz
+// Devuelve { cards, remainder } donde remainder es el texto que quedó incompleto
+function extractObjectsFromBuffer(buffer) {
   const cards = [];
+  let searchFrom = 0;
 
   while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+    // Buscar inicio de objeto
+    const start = buffer.indexOf('{', searchFrom);
+    if (start === -1) break;
 
-    received += value.length;
-    if (totalBytes && onProgress) onProgress(Math.round((received / totalBytes) * 100));
+    // Buscar el fin del objeto contando llaves
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let end = -1;
 
-    buffer += decoder.decode(value, { stream: true });
-
-    let i = 0;
-    while (i < buffer.length) {
+    for (let i = start; i < buffer.length; i++) {
       const ch = buffer[i];
-
-      if (escape) { escape = false; i++; continue; }
-      if (ch === '\\' && inString) { escape = true; i++; continue; }
-      if (ch === '"') { inString = !inString; i++; continue; }
-      if (inString) { i++; continue; }
-
-      if (!started) {
-        if (ch === '[') started = true;
-        i++;
-        continue;
-      }
-
-      if (ch === '{') {
-        if (depth === 0) objectStart = i;
-        depth++;
-      } else if (ch === '}') {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\' && inString) { escape = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === '{') depth++;
+      else if (ch === '}') {
         depth--;
-        if (depth === 0 && objectStart !== -1) {
-          try { cards.push(JSON.parse(buffer.slice(objectStart, i + 1))); } catch (e) {}
-          objectStart = -1;
-        }
+        if (depth === 0) { end = i; break; }
       }
-      i++;
     }
 
-    if (objectStart !== -1) {
-      buffer = buffer.slice(objectStart);
-      objectStart = 0;
-    } else {
-      buffer = buffer.slice(i);
-    }
+    if (end === -1) break; // objeto incompleto, esperar más datos
+
+    const card = extractCardFields(buffer.slice(start, end + 1));
+    if (card) cards.push(card);
+    searchFrom = end + 1;
   }
 
-  return cards;
-}
-
-// ─── Parser para fetch (descarga automática) ──────────────────────────────────
-async function streamParseCardsArray(url, onProgress) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
-  const total = parseInt(response.headers.get('Content-Length')) || null;
-  return parseCardsStream(response.body, total, onProgress);
-}
-
-// ─── Parser para File (carga manual) ─────────────────────────────────────────
-async function streamParseCardsFile(file, onProgress) {
-  return parseCardsStream(file.stream(), file.size, onProgress);
+  return { cards, remainder: buffer.slice(searchFrom) };
 }
 
 function ManaboxToMoxfield() {
@@ -90,74 +74,98 @@ function ManaboxToMoxfield() {
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
   const [dbLoading, setDbLoading] = useState(false);
 
+  // Indexa las cartas en los tres índices
+  const buildIndexes = (cards) => {
+    const colorMap = {};
+    const nameIndex = {};
+    const collectorIndex = {};
+
+    for (const card of cards) {
+      if (card.id && card.color_identity !== undefined) {
+        colorMap[card.id] = card.color_identity;
+      }
+      if (card.name && card.set) {
+        nameIndex[`${card.name.toLowerCase()}|${card.set.toLowerCase()}`] = card.color_identity || [];
+      }
+      if (card.set && card.collector_number) {
+        collectorIndex[`${card.set.toLowerCase()}|${card.collector_number}`] = {
+          color_identity: card.color_identity || [],
+          name: card.name
+        };
+      }
+    }
+
+    console.log(`✅ Indexadas: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+    setCardDatabase(colorMap);
+    setCardNameIndex(nameIndex);
+    setCardCollectorIndex(collectorIndex);
+    setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+    setDbLoading(false);
+  };
+
   const loadScryfallDatabaseAuto = async () => {
     setDbLoading(true);
     setError('');
     setProgress('Conectando con Scryfall...');
-    
+
     try {
       const bulkResponse = await fetch('https://api.scryfall.com/bulk-data');
-      
-      if (!bulkResponse.ok) {
-        throw new Error('No se pudo conectar con Scryfall');
-      }
-      
+      if (!bulkResponse.ok) throw new Error('No se pudo conectar con Scryfall');
+
       const bulkData = await bulkResponse.json();
       const defaultCards = bulkData.data.find(item => item.type === 'default_cards');
-      
-      if (!defaultCards) {
-        throw new Error('No se pudo encontrar la base de datos de cartas');
+      if (!defaultCards) throw new Error('No se pudo encontrar la base de datos de cartas');
+
+      const sizeMB = Math.round((defaultCards.size || 0) / 1024 / 1024);
+      setProgress(`Descargando base de datos (~${sizeMB}MB)... 0%`);
+
+      const response = await fetch(defaultCards.download_uri);
+      if (!response.ok) throw new Error('Error al descargar la base de datos');
+
+      const total = parseInt(response.headers.get('Content-Length')) || null;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      let received = 0;
+      let buffer = '';
+      let allCards = [];
+      let lastYield = Date.now();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        received += value.length;
+        buffer += decoder.decode(value, { stream: true });
+
+        // Procesar cuando el buffer es suficientemente grande
+        if (buffer.length > 500000) {
+          const { cards, remainder } = extractObjectsFromBuffer(buffer);
+          allCards = allCards.concat(cards);
+          buffer = remainder;
+
+          if (total) {
+            setProgress(`Descargando base de datos (~${sizeMB}MB)... ${Math.round((received / total) * 100)}%`);
+          }
+
+          // Ceder el hilo cada 100ms para que no se congele el browser
+          if (Date.now() - lastYield > 100) {
+            await yieldToMain();
+            lastYield = Date.now();
+          }
+        }
       }
-      
-      setProgress('Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - 0%');
-      
-      // Parser incremental: no crea string gigante, procesa chunk a chunk
-      const cardsData = await streamParseCardsArray(
-        defaultCards.download_uri,
-        (pct) => setProgress(`Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - ${pct}%`)
-      );
-      
-      setProgress('Procesando base de datos...');
-      const colorMap = {};
-      const nameIndex = {};
-      const collectorIndex = {};
-      
-      console.log('📚 Iniciando indexación automática de base de datos...');
-      
-      cardsData.forEach((card, index) => {
-        if (card.id && card.color_identity !== undefined) {
-          colorMap[card.id] = card.color_identity;
-        }
-        
-        if (card.name && card.set) {
-          const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
-          nameIndex[key] = card.color_identity || [];
-        }
-        
-        if (card.set && card.collector_number) {
-          const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
-          collectorIndex[collectorKey] = {
-            color_identity: card.color_identity || [],
-            name: card.name
-          };
-        }
-        
-        if (index % 20000 === 0 && index > 0) {
-          console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
-        }
-      });
-      
-      console.log('✅ Indexación automática completada:');
-      console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
-      console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
-      
-      setCardDatabase(colorMap);
-      setCardNameIndex(nameIndex);
-      setCardCollectorIndex(collectorIndex);
-      setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      setDbLoading(false);
-      
+
+      // Procesar lo que quedó en el buffer
+      if (buffer.trim().length > 0) {
+        const { cards } = extractObjectsFromBuffer(buffer);
+        allCards = allCards.concat(cards);
+      }
+
+      setProgress('Indexando cartas...');
+      await yieldToMain();
+      buildIndexes(allCards);
+
     } catch (err) {
       setError(`No se pudo descargar automáticamente: ${err.message}. Por favor usa la Opción B (Carga Manual).`);
       setDbLoading(false);
@@ -168,76 +176,69 @@ function ManaboxToMoxfield() {
   const handleDatabaseUpload = async (event) => {
     const dbFile = event.target.files[0];
     if (!dbFile) return;
-    
+
     setProgress('Cargando base de datos... 0%');
     setError('');
-    
+    setDbLoading(true);
+
     try {
-      // Parser incremental: no carga todo el archivo en memoria de una vez
-      const cardsData = await streamParseCardsFile(
-        dbFile,
-        (pct) => setProgress(`Cargando base de datos... ${pct}%`)
-      );
-      
-      const colorMap = {};
-      const nameIndex = {};
-      const collectorIndex = {};
-      
-      console.log('📚 Iniciando indexación de base de datos...');
-      
-      cardsData.forEach((card, index) => {
-        // Índice por Scryfall ID
-        if (card.id && card.color_identity !== undefined) {
-          colorMap[card.id] = card.color_identity;
+      const total = dbFile.size;
+      const reader = dbFile.stream().getReader();
+      const decoder = new TextDecoder('utf-8');
+
+      let received = 0;
+      let buffer = '';
+      let allCards = [];
+      let lastYield = Date.now();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        received += value.length;
+        buffer += decoder.decode(value, { stream: true });
+
+        if (buffer.length > 500000) {
+          const { cards, remainder } = extractObjectsFromBuffer(buffer);
+          allCards = allCards.concat(cards);
+          buffer = remainder;
+
+          setProgress(`Cargando base de datos... ${Math.round((received / total) * 100)}%`);
+
+          if (Date.now() - lastYield > 100) {
+            await yieldToMain();
+            lastYield = Date.now();
+          }
         }
-        
-        // Índice por Nombre + Set
-        if (card.name && card.set) {
-          const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
-          nameIndex[key] = card.color_identity || [];
-        }
-        
-        // Índice por Set + Número de Colección (para búsqueda en Fase 2)
-        if (card.set && card.collector_number) {
-          const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
-          collectorIndex[collectorKey] = {
-            color_identity: card.color_identity || [],
-            name: card.name
-          };
-        }
-        
-        // Progreso cada 20000 cartas
-        if (index % 20000 === 0 && index > 0) {
-          console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
-        }
-      });
-      
-      console.log('✅ Indexación completada:');
-      console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
-      console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
-      
-      setCardDatabase(colorMap);
-      setCardNameIndex(nameIndex);
-      setCardCollectorIndex(collectorIndex);
-      setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      
+      }
+
+      if (buffer.trim().length > 0) {
+        const { cards } = extractObjectsFromBuffer(buffer);
+        allCards = allCards.concat(cards);
+      }
+
+      setProgress('Indexando cartas...');
+      await yieldToMain();
+      buildIndexes(allCards);
+
     } catch (err) {
       setError(`Error al cargar la base de datos: ${err.message}`);
       console.error('❌ Error completo:', err);
+      setDbLoading(false);
+      setProgress('');
     }
   };
 
   const parseTxtFormat = (text) => {
     const lines = text.split('\n').filter(line => line.trim());
     const cards = [];
-    
+
     lines.forEach(line => {
       const match = line.match(/^(\d+)\s+(.+?)\s+\(([^)]+)\)\s+(\d+)(.*)$/);
       if (match) {
         const [, quantity, name, setCode, collectorNumber, rest] = match;
         const isFoil = rest.includes('*F*');
-        
+
         cards.push({
           Quantity: quantity,
           Name: name.trim(),
@@ -249,7 +250,7 @@ function ManaboxToMoxfield() {
         });
       }
     });
-    
+
     return cards;
   };
 
@@ -268,7 +269,7 @@ function ManaboxToMoxfield() {
   const assignBinder = (colorIdentity) => {
     if (!colorIdentity || colorIdentity.length === 0) return 'incoloro';
     if (colorIdentity.length > 1) return 'multicolor';
-    
+
     const colorMap = {
       'W': 'blanco',
       'U': 'azul',
@@ -276,7 +277,7 @@ function ManaboxToMoxfield() {
       'R': 'rojo',
       'G': 'verde'
     };
-    
+
     return colorMap[colorIdentity[0]] || 'incoloro';
   };
 
@@ -284,9 +285,9 @@ function ManaboxToMoxfield() {
     if (cards.length === 0) {
       throw new Error('El archivo está vacío o no tiene el formato correcto');
     }
-    
+
     setProgress(`🔍 FASE 1: Búsqueda estándar de ${cards.length} cartas...`);
-    
+
     const moxfieldData = [];
     const notFoundInPhase1 = [];
     const binderStats = {
@@ -301,18 +302,18 @@ function ManaboxToMoxfield() {
     };
     let phase1FoundCount = 0;
     let totalCardsCount = 0;
-    
+
     // FASE 1: Búsqueda estándar
     for (let i = 0; i < cards.length; i++) {
       const card = cards[i];
       const quantity = parseInt(card.Quantity) || 1;
       totalCardsCount += quantity;
-      
+
       const scryfallId = card['Scryfall ID']?.trim();
       let binder = null;
       let colorIdentity = null;
       let found = false;
-      
+
       if (scryfallId && cardDatabase[scryfallId] !== undefined) {
         colorIdentity = cardDatabase[scryfallId];
         binder = assignBinder(colorIdentity);
@@ -327,7 +328,7 @@ function ManaboxToMoxfield() {
           phase1FoundCount++;
         }
       }
-      
+
       if (!found) {
         notFoundInPhase1.push({
           card: card,
@@ -335,9 +336,9 @@ function ManaboxToMoxfield() {
         });
         binder = 'no-catalogadas';
       }
-      
+
       binderStats[binder] += quantity;
-      
+
       const conditionMap = {
         'near_mint': 'Near Mint',
         'lightly_played': 'Lightly Played',
@@ -348,7 +349,7 @@ function ManaboxToMoxfield() {
       const condition = conditionMap[card.Condition] || 'Near Mint';
       const language = (card.Language || 'en').toUpperCase();
       const foil = card.Foil === 'foil' ? 'foil' : '';
-      
+
       moxfieldData.push({
         Count: quantity,
         Name: card.Name,
@@ -360,55 +361,55 @@ function ManaboxToMoxfield() {
         _tempIndex: i
       });
     }
-    
+
     console.log(`✅ Fase 1 completada: ${phase1FoundCount} cartas únicas encontradas, ${notFoundInPhase1.length} pendientes`);
-    
+
     // FASE 2: Búsqueda por Set + Número de Colección
     let phase2FoundCount = 0;
-    
+
     if (notFoundInPhase1.length > 0 && cardCollectorIndex) {
       setProgress(`🔍 FASE 2: Búsqueda avanzada de ${notFoundInPhase1.length} cartas por Set + Número...`);
-      
+
       for (const item of notFoundInPhase1) {
         const card = item.card;
         const collectorNumber = card['Collector number']?.toString().trim();
-        
+
         if (card['Set code'] && collectorNumber) {
           const collectorKey = `${card['Set code'].toLowerCase()}|${collectorNumber}`;
-          
+
           if (cardCollectorIndex[collectorKey]) {
             const cardInfo = cardCollectorIndex[collectorKey];
             const colorIdentity = cardInfo.color_identity;
             const newBinder = assignBinder(colorIdentity);
-            
+
             const cardInData = moxfieldData.find(c => c._tempIndex === item.index);
             if (cardInData) {
               const quantity = parseInt(cardInData.Count) || 1;
-              
+
               binderStats['no-catalogadas'] -= quantity;
               cardInData.Tags = newBinder;
               binderStats[newBinder] += quantity;
-              
+
               phase2FoundCount++;
               console.log(`✅ [Fase 2] ${card.Name}: Encontrada por ${card['Set code']}|${collectorNumber} → ${newBinder} (DB: ${cardInfo.name})`);
             }
           }
         }
       }
-      
+
       const stillNotFound = notFoundInPhase1.length - phase2FoundCount;
       console.log(`✅ Fase 2 completada: ${phase2FoundCount} adicionales encontradas, ${stillNotFound} sin catalogar`);
     }
-    
+
     const totalFoundCount = phase1FoundCount + phase2FoundCount;
     const totalNotFoundCount = cards.length - totalFoundCount;
-    
+
     console.log(`📊 Resumen final: ${totalFoundCount}/${cards.length} cartas únicas catalogadas`);
-    
+
     moxfieldData.forEach(card => delete card._tempIndex);
-    
+
     setProgress('📝 Generando archivos CSV por color...');
-    
+
     const cardsByBinder = {
       blanco: [],
       azul: [],
@@ -419,24 +420,24 @@ function ManaboxToMoxfield() {
       incoloro: [],
       'no-catalogadas': []
     };
-    
+
     moxfieldData.forEach(card => {
       cardsByBinder[card.Tags].push(card);
     });
-    
+
     const links = [];
     const originalName = file.name.replace(/\.(csv|txt)$/, '');
-    
+
     Object.entries(cardsByBinder).forEach(([binder, cards]) => {
       if (cards.length === 0) return;
-      
+
       const cardsWithoutTags = cards.map(({ Tags, ...rest }) => rest);
-      
+
       const csvContent = Papa.unparse(cardsWithoutTags, {
         quotes: true,
         header: true
       });
-      
+
       links.push({
         binder,
         filename: `${originalName}_${binder}.csv`,
@@ -444,11 +445,11 @@ function ManaboxToMoxfield() {
         count: cards.length
       });
     });
-    
+
     setDownloadLinks(links);
     setStats(binderStats);
     setCompleted(true);
-    
+
     const notFoundCardsCount = binderStats['no-catalogadas'];
     setProgress(`🎉 ¡Completado! ${links.length} archivos generados. ${totalFoundCount}/${cards.length} cartas únicas catalogadas (${totalCardsCount} cartas totales contando cantidades)${notFoundCardsCount > 0 ? `, ${totalNotFoundCount} únicas sin catalogar (${notFoundCardsCount} copias)` : ''}`);
     setProcessing(false);
@@ -456,16 +457,16 @@ function ManaboxToMoxfield() {
 
   const processFile = async () => {
     if (!file || !cardDatabase) return;
-    
+
     setProcessing(true);
     setError('');
     setCompleted(false);
     setProgress('Leyendo archivo...');
-    
+
     try {
       const text = await file.text();
       const isTxtFormat = file.name.endsWith('.txt');
-      
+
       if (isTxtFormat) {
         const cards = parseTxtFormat(text);
         if (cards.length === 0) {
@@ -507,7 +508,7 @@ function ManaboxToMoxfield() {
           <p className="text-slate-400 mb-6">
             Convierte tu colección de Manabox a formato Moxfield con binders por color
           </p>
-          
+
           <div className="space-y-6">
             <div className="bg-slate-700 rounded-lg p-4 space-y-2 text-sm text-slate-300">
               <h3 className="font-semibold text-white">Cómo usar:</h3>
@@ -532,7 +533,7 @@ function ManaboxToMoxfield() {
                     <p className="text-blue-300 text-sm mb-4">
                       Elige una de las dos opciones para cargar la base de datos:
                     </p>
-                    
+
                     <div className="space-y-3">
                       {/* Opción Automática */}
                       <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
@@ -552,7 +553,7 @@ function ManaboxToMoxfield() {
                           {dbLoading ? 'Descargando...' : 'Descargar Automáticamente'}
                         </button>
                       </div>
-                      
+
                       {/* Opción Manual */}
                       <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
                         <div className="flex items-center gap-2 mb-2">
@@ -568,7 +569,7 @@ function ManaboxToMoxfield() {
                           <li>Haz clic en "Download" para descargar el JSON</li>
                           <li>Sube el archivo aquí</li>
                         </ol>
-                        <a 
+                        <a
                           href="https://scryfall.com/docs/api/bulk-data"
                           target="_blank"
                           rel="noopener noreferrer"
@@ -593,7 +594,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             {cardDatabase && (
               <div className="bg-green-900/30 border border-green-700 rounded-lg p-4">
                 <div className="flex items-center gap-2">
@@ -604,7 +605,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             <div className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
               cardDatabase ? 'border-slate-600 hover:border-slate-500 cursor-pointer' : 'border-slate-700 opacity-50'
             }`}>
@@ -633,7 +634,7 @@ function ManaboxToMoxfield() {
                 </p>
               )}
             </div>
-            
+
             <button
               onClick={processFile}
               disabled={!file || processing || !cardDatabase}
@@ -642,7 +643,7 @@ function ManaboxToMoxfield() {
               <i data-lucide="download" className="w-5 h-5"></i>
               {processing ? 'Procesando...' : 'Paso 3: Convertir y Descargar'}
             </button>
-            
+
             {progress && (
               <div className={`rounded-lg p-4 ${completed ? 'bg-green-900/50 border border-green-700' : 'bg-slate-700'}`}>
                 <div className="flex items-center gap-2">
@@ -651,7 +652,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             {stats && (
               <div className="bg-slate-700 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-white mb-3">Resumen de la colección:</h3>
@@ -693,7 +694,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             {downloadLinks.length > 0 && (
               <div className="bg-slate-700 rounded-lg p-4 space-y-3">
                 <h3 className="font-semibold text-white mb-3">📥 Archivos generados - Haz clic para descargar:</h3>
@@ -709,7 +710,7 @@ function ManaboxToMoxfield() {
                       incoloro: '⚪',
                       'no-catalogadas': '❓'
                     };
-                    
+
                     return (
                       <button
                         key={index}
@@ -733,7 +734,7 @@ function ManaboxToMoxfield() {
                 </p>
               </div>
             )}
-            
+
             {error && (
               <div className="bg-red-900/50 border border-red-700 rounded-lg p-4 flex items-start gap-3">
                 <i data-lucide="alert-circle" className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5"></i>
