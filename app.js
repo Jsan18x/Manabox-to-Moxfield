@@ -1,16 +1,10 @@
 const { useState } = React;
 const { Upload, Download, AlertCircle, CheckCircle, Database, ExternalLink } = lucide;
 
-// ─── Parser JSON incremental para arrays grandes ───────────────────────────────
-// Procesa el stream en chunks sin crear un string gigante en memoria.
-// Extrae objetos JSON uno a uno conforme llegan los bytes.
-async function streamParseCardsArray(url, onProgress) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
-
-  const contentLength = response.headers.get('Content-Length');
-  const total = contentLength ? parseInt(contentLength) : null;
-  const reader = response.body.getReader();
+// ─── Lógica compartida de parser incremental ──────────────────────────────────
+// Procesa un ReadableStream de texto en chunks, extrae objetos JSON uno a uno.
+async function parseCardsStream(stream, totalBytes, onProgress) {
+  const reader = stream.getReader();
   const decoder = new TextDecoder('utf-8');
 
   let received = 0;
@@ -19,7 +13,7 @@ async function streamParseCardsArray(url, onProgress) {
   let inString = false;
   let escape = false;
   let objectStart = -1;
-  let started = false; // ya encontramos el '[' inicial
+  let started = false;
   const cards = [];
 
   while (true) {
@@ -27,26 +21,21 @@ async function streamParseCardsArray(url, onProgress) {
     if (done) break;
 
     received += value.length;
-    if (total && onProgress) onProgress(Math.round((received / total) * 100));
+    if (totalBytes && onProgress) onProgress(Math.round((received / totalBytes) * 100));
 
     buffer += decoder.decode(value, { stream: true });
 
-    // Procesar el buffer carácter a carácter para extraer objetos completos
     let i = 0;
     while (i < buffer.length) {
       const ch = buffer[i];
 
       if (escape) { escape = false; i++; continue; }
-
       if (ch === '\\' && inString) { escape = true; i++; continue; }
-
       if (ch === '"') { inString = !inString; i++; continue; }
-
       if (inString) { i++; continue; }
 
-      // Fuera de string
       if (!started) {
-        if (ch === '[') { started = true; }
+        if (ch === '[') started = true;
         i++;
         continue;
       }
@@ -57,29 +46,35 @@ async function streamParseCardsArray(url, onProgress) {
       } else if (ch === '}') {
         depth--;
         if (depth === 0 && objectStart !== -1) {
-          const jsonStr = buffer.slice(objectStart, i + 1);
-          try {
-            cards.push(JSON.parse(jsonStr));
-          } catch (e) {
-            // ignorar objeto malformado
-          }
+          try { cards.push(JSON.parse(buffer.slice(objectStart, i + 1))); } catch (e) {}
           objectStart = -1;
         }
       }
       i++;
     }
 
-    // Mantener solo el fragmento no procesado en buffer
     if (objectStart !== -1) {
       buffer = buffer.slice(objectStart);
       objectStart = 0;
     } else {
-      // Guardar solo los últimos chars necesarios (para no perder inicio de próximo objeto)
       buffer = buffer.slice(i);
     }
   }
 
   return cards;
+}
+
+// ─── Parser para fetch (descarga automática) ──────────────────────────────────
+async function streamParseCardsArray(url, onProgress) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
+  const total = parseInt(response.headers.get('Content-Length')) || null;
+  return parseCardsStream(response.body, total, onProgress);
+}
+
+// ─── Parser para File (carga manual) ─────────────────────────────────────────
+async function streamParseCardsFile(file, onProgress) {
+  return parseCardsStream(file.stream(), file.size, onProgress);
 }
 
 function ManaboxToMoxfield() {
@@ -174,12 +169,15 @@ function ManaboxToMoxfield() {
     const dbFile = event.target.files[0];
     if (!dbFile) return;
     
-    setProgress('Cargando base de datos...');
+    setProgress('Cargando base de datos... 0%');
     setError('');
     
     try {
-      const text = await dbFile.text();
-      const cardsData = JSON.parse(text);
+      // Parser incremental: no carga todo el archivo en memoria de una vez
+      const cardsData = await streamParseCardsFile(
+        dbFile,
+        (pct) => setProgress(`Cargando base de datos... ${pct}%`)
+      );
       
       const colorMap = {};
       const nameIndex = {};
