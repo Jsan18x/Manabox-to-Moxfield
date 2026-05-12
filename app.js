@@ -14,6 +14,38 @@ function ManaboxToMoxfield() {
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
   const [dbLoading, setDbLoading] = useState(false);
 
+  // FIX: streaming por chunks para manejar archivos grandes sin crash
+  const fetchLargeJSON = async (url, onProgress) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
+
+    const contentLength = response.headers.get('Content-Length');
+    const total = contentLength ? parseInt(contentLength) : null;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let received = 0;
+    let chunks = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(decoder.decode(value, { stream: true }));
+      received += value.length;
+      if (total && onProgress) {
+        onProgress(Math.round((received / total) * 100));
+      }
+    }
+
+    const fullText = chunks.join('');
+    chunks = null; // liberar memoria antes del parse
+
+    try {
+      return JSON.parse(fullText);
+    } catch (e) {
+      throw new Error('El archivo descargado está incompleto o corrupto. Intenta de nuevo.');
+    }
+  };
+
   const loadScryfallDatabaseAuto = async () => {
     setDbLoading(true);
     setError('');
@@ -33,17 +65,15 @@ function ManaboxToMoxfield() {
         throw new Error('No se pudo encontrar la base de datos de cartas');
       }
       
-      setProgress('Descargando base de datos completa... esto puede tardar 1-2 minutos (~500MB)');
+      setProgress('Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - 0%');
       
-      const cardsResponse = await fetch(defaultCards.download_uri);
-      
-      if (!cardsResponse.ok) {
-        throw new Error('Error al descargar la base de datos');
-      }
+      // FIX: usar streaming en lugar de response.json() directo
+      const cardsData = await fetchLargeJSON(
+        defaultCards.download_uri,
+        (pct) => setProgress(`Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - ${pct}%`)
+      );
       
       setProgress('Procesando base de datos...');
-      const cardsData = await cardsResponse.json();
-      
       const colorMap = {};
       const nameIndex = {};
       const collectorIndex = {};
@@ -464,7 +494,7 @@ function ManaboxToMoxfield() {
                           <h4 className="text-white font-semibold text-sm">Opción A: Descarga Automática (Recomendado)</h4>
                         </div>
                         <p className="text-slate-300 text-xs mb-3">
-                          Descarga la base de datos directamente desde Scryfall. Requiere buena conexión a internet.
+                          Descarga la base de datos completa desde Scryfall (~500MB). Puede tardar 2-5 minutos. El progreso se muestra en pantalla.
                         </p>
                         <button
                           onClick={loadScryfallDatabaseAuto}
@@ -488,7 +518,7 @@ function ManaboxToMoxfield() {
                         <ol className="text-slate-300 text-xs mb-3 ml-4 space-y-1 list-decimal">
                           <li>Haz clic en el enlace de abajo</li>
                           <li>Busca "Default Cards" en la tabla</li>
-                          <li>Haz clic en "Download" para descargar el JSON</li>
+                          <li>Haz clic en "Download" para descargar el JSON (~500MB)</li>
                           <li>Sube el archivo aquí</li>
                         </ol>
                         <a 
