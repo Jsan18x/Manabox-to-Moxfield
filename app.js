@@ -1,6 +1,87 @@
 const { useState } = React;
 const { Upload, Download, AlertCircle, CheckCircle, Database, ExternalLink } = lucide;
 
+// ─── Parser JSON incremental para arrays grandes ───────────────────────────────
+// Procesa el stream en chunks sin crear un string gigante en memoria.
+// Extrae objetos JSON uno a uno conforme llegan los bytes.
+async function streamParseCardsArray(url, onProgress) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
+
+  const contentLength = response.headers.get('Content-Length');
+  const total = contentLength ? parseInt(contentLength) : null;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+
+  let received = 0;
+  let buffer = '';
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let objectStart = -1;
+  let started = false; // ya encontramos el '[' inicial
+  const cards = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    received += value.length;
+    if (total && onProgress) onProgress(Math.round((received / total) * 100));
+
+    buffer += decoder.decode(value, { stream: true });
+
+    // Procesar el buffer carácter a carácter para extraer objetos completos
+    let i = 0;
+    while (i < buffer.length) {
+      const ch = buffer[i];
+
+      if (escape) { escape = false; i++; continue; }
+
+      if (ch === '\\' && inString) { escape = true; i++; continue; }
+
+      if (ch === '"') { inString = !inString; i++; continue; }
+
+      if (inString) { i++; continue; }
+
+      // Fuera de string
+      if (!started) {
+        if (ch === '[') { started = true; }
+        i++;
+        continue;
+      }
+
+      if (ch === '{') {
+        if (depth === 0) objectStart = i;
+        depth++;
+      } else if (ch === '}') {
+        depth--;
+        if (depth === 0 && objectStart !== -1) {
+          const jsonStr = buffer.slice(objectStart, i + 1);
+          try {
+            cards.push(JSON.parse(jsonStr));
+          } catch (e) {
+            // ignorar objeto malformado
+          }
+          objectStart = -1;
+        }
+      }
+      i++;
+    }
+
+    // Mantener solo el fragmento no procesado en buffer
+    if (objectStart !== -1) {
+      buffer = buffer.slice(objectStart);
+      objectStart = 0;
+    } else {
+      // Guardar solo los últimos chars necesarios (para no perder inicio de próximo objeto)
+      buffer = buffer.slice(i);
+    }
+  }
+
+  return cards;
+}
+
 function ManaboxToMoxfield() {
   const [file, setFile] = useState(null);
   const [processing, setProcessing] = useState(false);
@@ -13,38 +94,6 @@ function ManaboxToMoxfield() {
   const [cardNameIndex, setCardNameIndex] = useState(null);
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
   const [dbLoading, setDbLoading] = useState(false);
-
-  // FIX: streaming por chunks para manejar archivos grandes sin crash
-  const fetchLargeJSON = async (url, onProgress) => {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Error HTTP ${response.status}`);
-
-    const contentLength = response.headers.get('Content-Length');
-    const total = contentLength ? parseInt(contentLength) : null;
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let received = 0;
-    let chunks = [];
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(decoder.decode(value, { stream: true }));
-      received += value.length;
-      if (total && onProgress) {
-        onProgress(Math.round((received / total) * 100));
-      }
-    }
-
-    const fullText = chunks.join('');
-    chunks = null; // liberar memoria antes del parse
-
-    try {
-      return JSON.parse(fullText);
-    } catch (e) {
-      throw new Error('El archivo descargado está incompleto o corrupto. Intenta de nuevo.');
-    }
-  };
 
   const loadScryfallDatabaseAuto = async () => {
     setDbLoading(true);
@@ -67,8 +116,8 @@ function ManaboxToMoxfield() {
       
       setProgress('Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - 0%');
       
-      // FIX: usar streaming en lugar de response.json() directo
-      const cardsData = await fetchLargeJSON(
+      // Parser incremental: no crea string gigante, procesa chunk a chunk
+      const cardsData = await streamParseCardsArray(
         defaultCards.download_uri,
         (pct) => setProgress(`Descargando base de datos completa... esto puede tardar 2-5 minutos (~500MB) - ${pct}%`)
       );
@@ -494,7 +543,7 @@ function ManaboxToMoxfield() {
                           <h4 className="text-white font-semibold text-sm">Opción A: Descarga Automática (Recomendado)</h4>
                         </div>
                         <p className="text-slate-300 text-xs mb-3">
-                          Descarga la base de datos completa desde Scryfall (~500MB). Puede tardar 2-5 minutos. El progreso se muestra en pantalla.
+                          Descarga la base de datos directamente desde Scryfall. Requiere buena conexión a internet.
                         </p>
                         <button
                           onClick={loadScryfallDatabaseAuto}
@@ -518,7 +567,7 @@ function ManaboxToMoxfield() {
                         <ol className="text-slate-300 text-xs mb-3 ml-4 space-y-1 list-decimal">
                           <li>Haz clic en el enlace de abajo</li>
                           <li>Busca "Default Cards" en la tabla</li>
-                          <li>Haz clic en "Download" para descargar el JSON (~500MB)</li>
+                          <li>Haz clic en "Download" para descargar el JSON</li>
                           <li>Sube el archivo aquí</li>
                         </ol>
                         <a 
