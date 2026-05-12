@@ -14,76 +14,39 @@ function ManaboxToMoxfield() {
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
   const [dbLoading, setDbLoading] = useState(false);
 
+  // ─── FIX #2: leer como text() primero, luego JSON.parse ───────────────────
   const loadScryfallDatabaseAuto = async () => {
     setDbLoading(true);
     setError('');
     setProgress('Conectando con Scryfall...');
-    
+
     try {
       const bulkResponse = await fetch('https://api.scryfall.com/bulk-data');
-      
-      if (!bulkResponse.ok) {
-        throw new Error('No se pudo conectar con Scryfall');
-      }
-      
+      if (!bulkResponse.ok) throw new Error('No se pudo conectar con Scryfall');
+
       const bulkData = await bulkResponse.json();
       const defaultCards = bulkData.data.find(item => item.type === 'default_cards');
-      
-      if (!defaultCards) {
-        throw new Error('No se pudo encontrar la base de datos de cartas');
-      }
-      
-      setProgress('Descargando base de datos completa... esto puede tardar 1-2 minutos (~500MB)');
-      
+      if (!defaultCards) throw new Error('No se pudo encontrar la base de datos de cartas');
+
+      setProgress('Descargando base de datos completa... esto puede tardar 1-2 minutos (~100MB)');
+
       const cardsResponse = await fetch(defaultCards.download_uri);
-      
-      if (!cardsResponse.ok) {
-        throw new Error('Error al descargar la base de datos');
-      }
-      
+      if (!cardsResponse.ok) throw new Error('Error al descargar la base de datos');
+
+      // FIX: leer como texto primero para evitar que el stream se corte
+      setProgress('Leyendo datos... (archivo grande, por favor espera)');
+      const rawText = await cardsResponse.text();
+
       setProgress('Procesando base de datos...');
-      const cardsData = await cardsResponse.json();
-      
-      const colorMap = {};
-      const nameIndex = {};
-      const collectorIndex = {};
-      
-      console.log('📚 Iniciando indexación automática de base de datos...');
-      
-      cardsData.forEach((card, index) => {
-        if (card.id && card.color_identity !== undefined) {
-          colorMap[card.id] = card.color_identity;
-        }
-        
-        if (card.name && card.set) {
-          const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
-          nameIndex[key] = card.color_identity || [];
-        }
-        
-        if (card.set && card.collector_number) {
-          const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
-          collectorIndex[collectorKey] = {
-            color_identity: card.color_identity || [],
-            name: card.name
-          };
-        }
-        
-        if (index % 20000 === 0 && index > 0) {
-          console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
-        }
-      });
-      
-      console.log('✅ Indexación automática completada:');
-      console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
-      console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
-      
-      setCardDatabase(colorMap);
-      setCardNameIndex(nameIndex);
-      setCardCollectorIndex(collectorIndex);
-      setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      setDbLoading(false);
-      
+      let cardsData;
+      try {
+        cardsData = JSON.parse(rawText);
+      } catch (parseErr) {
+        throw new Error('El archivo descargado está incompleto o corrupto. Intenta de nuevo o usa la Opción B.');
+      }
+
+      buildIndexes(cardsData);
+
     } catch (err) {
       setError(`No se pudo descargar automáticamente: ${err.message}. Por favor usa la Opción B (Carga Manual).`);
       setDbLoading(false);
@@ -91,76 +54,89 @@ function ManaboxToMoxfield() {
     }
   };
 
-  const handleDatabaseUpload = async (event) => {
+  // ─── FIX #1: usar FileReader en lugar de file.text() ──────────────────────
+  const handleDatabaseUpload = (event) => {
     const dbFile = event.target.files[0];
     if (!dbFile) return;
-    
+
     setProgress('Cargando base de datos...');
     setError('');
-    
-    try {
-      const text = await dbFile.text();
-      const cardsData = JSON.parse(text);
-      
-      const colorMap = {};
-      const nameIndex = {};
-      const collectorIndex = {};
-      
-      console.log('📚 Iniciando indexación de base de datos...');
-      
-      cardsData.forEach((card, index) => {
-        // Índice por Scryfall ID
-        if (card.id && card.color_identity !== undefined) {
-          colorMap[card.id] = card.color_identity;
-        }
-        
-        // Índice por Nombre + Set
-        if (card.name && card.set) {
-          const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
-          nameIndex[key] = card.color_identity || [];
-        }
-        
-        // Índice por Set + Número de Colección (para búsqueda en Fase 2)
-        if (card.set && card.collector_number) {
-          const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
-          collectorIndex[collectorKey] = {
-            color_identity: card.color_identity || [],
-            name: card.name
-          };
-        }
-        
-        // Progreso cada 20000 cartas
-        if (index % 20000 === 0 && index > 0) {
-          console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
-        }
-      });
-      
-      console.log('✅ Indexación completada:');
-      console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
-      console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
-      
-      setCardDatabase(colorMap);
-      setCardNameIndex(nameIndex);
-      setCardCollectorIndex(collectorIndex);
-      setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
-      
-    } catch (err) {
-      setError(`Error al cargar la base de datos: ${err.message}`);
-      console.error('❌ Error completo:', err);
-    }
+
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+      try {
+        const cardsData = JSON.parse(e.target.result);
+        buildIndexes(cardsData);
+      } catch (err) {
+        setError(`Error al cargar la base de datos: ${err.message}`);
+        console.error('❌ Error completo:', err);
+      }
+    };
+
+    reader.onerror = () => {
+      setError('Error al leer el archivo. Intenta seleccionarlo de nuevo.');
+    };
+
+    reader.readAsText(dbFile);
+
+    // Resetear el input para que se pueda volver a seleccionar el mismo archivo
+    event.target.value = '';
+  };
+
+  // ─── Función compartida de indexación ─────────────────────────────────────
+  const buildIndexes = (cardsData) => {
+    const colorMap = {};
+    const nameIndex = {};
+    const collectorIndex = {};
+
+    console.log('📚 Iniciando indexación de base de datos...');
+
+    cardsData.forEach((card, index) => {
+      if (card.id && card.color_identity !== undefined) {
+        colorMap[card.id] = card.color_identity;
+      }
+
+      if (card.name && card.set) {
+        const key = `${card.name.toLowerCase()}|${card.set.toLowerCase()}`;
+        nameIndex[key] = card.color_identity || [];
+      }
+
+      if (card.set && card.collector_number) {
+        const collectorKey = `${card.set.toLowerCase()}|${card.collector_number}`;
+        collectorIndex[collectorKey] = {
+          color_identity: card.color_identity || [],
+          name: card.name
+        };
+      }
+
+      if (index % 20000 === 0 && index > 0) {
+        console.log(`   Procesadas ${index.toLocaleString()} cartas...`);
+      }
+    });
+
+    console.log('✅ Indexación completada:');
+    console.log(`   - colorMap: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+    console.log(`   - nameIndex: ${Object.keys(nameIndex).length.toLocaleString()} cartas`);
+    console.log(`   - collectorIndex: ${Object.keys(collectorIndex).length.toLocaleString()} cartas`);
+
+    setCardDatabase(colorMap);
+    setCardNameIndex(nameIndex);
+    setCardCollectorIndex(collectorIndex);
+    setProgress(`✓ Base de datos cargada: ${Object.keys(colorMap).length.toLocaleString()} cartas`);
+    setDbLoading(false);
   };
 
   const parseTxtFormat = (text) => {
     const lines = text.split('\n').filter(line => line.trim());
     const cards = [];
-    
+
     lines.forEach(line => {
       const match = line.match(/^(\d+)\s+(.+?)\s+\(([^)]+)\)\s+(\d+)(.*)$/);
       if (match) {
         const [, quantity, name, setCode, collectorNumber, rest] = match;
         const isFoil = rest.includes('*F*');
-        
+
         cards.push({
           Quantity: quantity,
           Name: name.trim(),
@@ -172,7 +148,7 @@ function ManaboxToMoxfield() {
         });
       }
     });
-    
+
     return cards;
   };
 
@@ -191,7 +167,7 @@ function ManaboxToMoxfield() {
   const assignBinder = (colorIdentity) => {
     if (!colorIdentity || colorIdentity.length === 0) return 'incoloro';
     if (colorIdentity.length > 1) return 'multicolor';
-    
+
     const colorMap = {
       'W': 'blanco',
       'U': 'azul',
@@ -199,7 +175,7 @@ function ManaboxToMoxfield() {
       'R': 'rojo',
       'G': 'verde'
     };
-    
+
     return colorMap[colorIdentity[0]] || 'incoloro';
   };
 
@@ -207,35 +183,28 @@ function ManaboxToMoxfield() {
     if (cards.length === 0) {
       throw new Error('El archivo está vacío o no tiene el formato correcto');
     }
-    
+
     setProgress(`🔍 FASE 1: Búsqueda estándar de ${cards.length} cartas...`);
-    
+
     const moxfieldData = [];
     const notFoundInPhase1 = [];
     const binderStats = {
-      blanco: 0,
-      azul: 0,
-      negro: 0,
-      rojo: 0,
-      verde: 0,
-      multicolor: 0,
-      incoloro: 0,
-      'no-catalogadas': 0
+      blanco: 0, azul: 0, negro: 0, rojo: 0, verde: 0,
+      multicolor: 0, incoloro: 0, 'no-catalogadas': 0
     };
     let phase1FoundCount = 0;
     let totalCardsCount = 0;
-    
-    // FASE 1: Búsqueda estándar
+
     for (let i = 0; i < cards.length; i++) {
       const card = cards[i];
       const quantity = parseInt(card.Quantity) || 1;
       totalCardsCount += quantity;
-      
+
       const scryfallId = card['Scryfall ID']?.trim();
       let binder = null;
       let colorIdentity = null;
       let found = false;
-      
+
       if (scryfallId && cardDatabase[scryfallId] !== undefined) {
         colorIdentity = cardDatabase[scryfallId];
         binder = assignBinder(colorIdentity);
@@ -250,17 +219,14 @@ function ManaboxToMoxfield() {
           phase1FoundCount++;
         }
       }
-      
+
       if (!found) {
-        notFoundInPhase1.push({
-          card: card,
-          index: i
-        });
+        notFoundInPhase1.push({ card, index: i });
         binder = 'no-catalogadas';
       }
-      
+
       binderStats[binder] += quantity;
-      
+
       const conditionMap = {
         'near_mint': 'Near Mint',
         'lightly_played': 'Lightly Played',
@@ -271,7 +237,7 @@ function ManaboxToMoxfield() {
       const condition = conditionMap[card.Condition] || 'Near Mint';
       const language = (card.Language || 'en').toUpperCase();
       const foil = card.Foil === 'foil' ? 'foil' : '';
-      
+
       moxfieldData.push({
         Count: quantity,
         Name: card.Name,
@@ -283,83 +249,65 @@ function ManaboxToMoxfield() {
         _tempIndex: i
       });
     }
-    
-    console.log(`✅ Fase 1 completada: ${phase1FoundCount} cartas únicas encontradas, ${notFoundInPhase1.length} pendientes`);
-    
-    // FASE 2: Búsqueda por Set + Número de Colección
+
+    console.log(`✅ Fase 1: ${phase1FoundCount} encontradas, ${notFoundInPhase1.length} pendientes`);
+
     let phase2FoundCount = 0;
-    
+
     if (notFoundInPhase1.length > 0 && cardCollectorIndex) {
       setProgress(`🔍 FASE 2: Búsqueda avanzada de ${notFoundInPhase1.length} cartas por Set + Número...`);
-      
+
       for (const item of notFoundInPhase1) {
         const card = item.card;
         const collectorNumber = card['Collector number']?.toString().trim();
-        
+
         if (card['Set code'] && collectorNumber) {
           const collectorKey = `${card['Set code'].toLowerCase()}|${collectorNumber}`;
-          
+
           if (cardCollectorIndex[collectorKey]) {
             const cardInfo = cardCollectorIndex[collectorKey];
-            const colorIdentity = cardInfo.color_identity;
-            const newBinder = assignBinder(colorIdentity);
-            
+            const newBinder = assignBinder(cardInfo.color_identity);
             const cardInData = moxfieldData.find(c => c._tempIndex === item.index);
+
             if (cardInData) {
               const quantity = parseInt(cardInData.Count) || 1;
-              
               binderStats['no-catalogadas'] -= quantity;
               cardInData.Tags = newBinder;
               binderStats[newBinder] += quantity;
-              
               phase2FoundCount++;
-              console.log(`✅ [Fase 2] ${card.Name}: Encontrada por ${card['Set code']}|${collectorNumber} → ${newBinder} (DB: ${cardInfo.name})`);
             }
           }
         }
       }
-      
-      const stillNotFound = notFoundInPhase1.length - phase2FoundCount;
-      console.log(`✅ Fase 2 completada: ${phase2FoundCount} adicionales encontradas, ${stillNotFound} sin catalogar`);
+
+      console.log(`✅ Fase 2: ${phase2FoundCount} adicionales encontradas`);
     }
-    
+
     const totalFoundCount = phase1FoundCount + phase2FoundCount;
     const totalNotFoundCount = cards.length - totalFoundCount;
-    
-    console.log(`📊 Resumen final: ${totalFoundCount}/${cards.length} cartas únicas catalogadas`);
-    
+
     moxfieldData.forEach(card => delete card._tempIndex);
-    
+
     setProgress('📝 Generando archivos CSV por color...');
-    
+
     const cardsByBinder = {
-      blanco: [],
-      azul: [],
-      negro: [],
-      rojo: [],
-      verde: [],
-      multicolor: [],
-      incoloro: [],
-      'no-catalogadas': []
+      blanco: [], azul: [], negro: [], rojo: [], verde: [],
+      multicolor: [], incoloro: [], 'no-catalogadas': []
     };
-    
+
     moxfieldData.forEach(card => {
       cardsByBinder[card.Tags].push(card);
     });
-    
+
     const links = [];
     const originalName = file.name.replace(/\.(csv|txt)$/, '');
-    
+
     Object.entries(cardsByBinder).forEach(([binder, cards]) => {
       if (cards.length === 0) return;
-      
+
       const cardsWithoutTags = cards.map(({ Tags, ...rest }) => rest);
-      
-      const csvContent = Papa.unparse(cardsWithoutTags, {
-        quotes: true,
-        header: true
-      });
-      
+      const csvContent = Papa.unparse(cardsWithoutTags, { quotes: true, header: true });
+
       links.push({
         binder,
         filename: `${originalName}_${binder}.csv`,
@@ -367,57 +315,67 @@ function ManaboxToMoxfield() {
         count: cards.length
       });
     });
-    
+
     setDownloadLinks(links);
     setStats(binderStats);
     setCompleted(true);
-    
+
     const notFoundCardsCount = binderStats['no-catalogadas'];
-    setProgress(`🎉 ¡Completado! ${links.length} archivos generados. ${totalFoundCount}/${cards.length} cartas únicas catalogadas (${totalCardsCount} cartas totales contando cantidades)${notFoundCardsCount > 0 ? `, ${totalNotFoundCount} únicas sin catalogar (${notFoundCardsCount} copias)` : ''}`);
+    setProgress(`🎉 ¡Completado! ${links.length} archivos generados. ${totalFoundCount}/${cards.length} cartas únicas catalogadas (${totalCardsCount} totales)${notFoundCardsCount > 0 ? `, ${totalNotFoundCount} únicas sin catalogar (${notFoundCardsCount} copias)` : ''}`);
     setProcessing(false);
   };
 
+  // ─── FIX #1 también aplica aquí: usar FileReader para el archivo Manabox ──
   const processFile = async () => {
     if (!file || !cardDatabase) return;
-    
+
     setProcessing(true);
     setError('');
     setCompleted(false);
     setProgress('Leyendo archivo...');
-    
-    try {
-      const text = await file.text();
-      const isTxtFormat = file.name.endsWith('.txt');
-      
-      if (isTxtFormat) {
-        const cards = parseTxtFormat(text);
-        if (cards.length === 0) {
-          throw new Error('No se pudieron leer cartas del archivo TXT');
-        }
-        await processCards(cards);
-      } else {
-        Papa.parse(text, {
-          header: true,
-          skipEmptyLines: true,
-          dynamicTyping: false,
-          complete: async (results) => {
-            try {
-              await processCards(results.data);
-            } catch (err) {
-              setError(`Error al procesar: ${err.message}`);
+
+    const reader = new FileReader();
+
+    reader.onload = async (e) => {
+      try {
+        const text = e.target.result;
+        const isTxtFormat = file.name.endsWith('.txt');
+
+        if (isTxtFormat) {
+          const cards = parseTxtFormat(text);
+          if (cards.length === 0) throw new Error('No se pudieron leer cartas del archivo TXT');
+          await processCards(cards);
+        } else {
+          Papa.parse(text, {
+            header: true,
+            skipEmptyLines: true,
+            dynamicTyping: false,
+            complete: async (results) => {
+              try {
+                await processCards(results.data);
+              } catch (err) {
+                setError(`Error al procesar: ${err.message}`);
+                setProcessing(false);
+              }
+            },
+            error: (err) => {
+              setError(`Error al leer el archivo: ${err.message}`);
               setProcessing(false);
             }
-          },
-          error: (err) => {
-            setError(`Error al leer el archivo: ${err.message}`);
-            setProcessing(false);
-          }
-        });
+          });
+        }
+      } catch (err) {
+        setError(`Error: ${err.message}`);
+        setProcessing(false);
       }
-    } catch (err) {
-      setError(`Error: ${err.message}`);
+    };
+
+    reader.onerror = () => {
+      setError('Error al leer el archivo. Intenta seleccionarlo de nuevo.');
       setProcessing(false);
-    }
+    };
+
+    reader.readAsText(file);
   };
 
   return (
@@ -430,7 +388,7 @@ function ManaboxToMoxfield() {
           <p className="text-slate-400 mb-6">
             Convierte tu colección de Manabox a formato Moxfield con binders por color
           </p>
-          
+
           <div className="space-y-6">
             <div className="bg-slate-700 rounded-lg p-4 space-y-2 text-sm text-slate-300">
               <h3 className="font-semibold text-white">Cómo usar:</h3>
@@ -455,9 +413,8 @@ function ManaboxToMoxfield() {
                     <p className="text-blue-300 text-sm mb-4">
                       Elige una de las dos opciones para cargar la base de datos:
                     </p>
-                    
+
                     <div className="space-y-3">
-                      {/* Opción Automática */}
                       <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
                         <div className="flex items-center gap-2 mb-2">
                           <i data-lucide="zap" className="w-4 h-4 text-yellow-400"></i>
@@ -475,8 +432,7 @@ function ManaboxToMoxfield() {
                           {dbLoading ? 'Descargando...' : 'Descargar Automáticamente'}
                         </button>
                       </div>
-                      
-                      {/* Opción Manual */}
+
                       <div className="bg-slate-700/50 rounded-lg p-4 border border-slate-600">
                         <div className="flex items-center gap-2 mb-2">
                           <i data-lucide="upload" className="w-4 h-4 text-green-400"></i>
@@ -491,7 +447,7 @@ function ManaboxToMoxfield() {
                           <li>Haz clic en "Download" para descargar el JSON</li>
                           <li>Sube el archivo aquí</li>
                         </ol>
-                        <a 
+                        <a
                           href="https://scryfall.com/docs/api/bulk-data"
                           target="_blank"
                           rel="noopener noreferrer"
@@ -516,7 +472,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             {cardDatabase && (
               <div className="bg-green-900/30 border border-green-700 rounded-lg p-4">
                 <div className="flex items-center gap-2">
@@ -527,7 +483,7 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             <div className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
               cardDatabase ? 'border-slate-600 hover:border-slate-500 cursor-pointer' : 'border-slate-700 opacity-50'
             }`}>
@@ -556,7 +512,7 @@ function ManaboxToMoxfield() {
                 </p>
               )}
             </div>
-            
+
             <button
               onClick={processFile}
               disabled={!file || processing || !cardDatabase}
@@ -565,7 +521,7 @@ function ManaboxToMoxfield() {
               <i data-lucide="download" className="w-5 h-5"></i>
               {processing ? 'Procesando...' : 'Paso 3: Convertir y Descargar'}
             </button>
-            
+
             {progress && (
               <div className={`rounded-lg p-4 ${completed ? 'bg-green-900/50 border border-green-700' : 'bg-slate-700'}`}>
                 <div className="flex items-center gap-2">
@@ -574,65 +530,36 @@ function ManaboxToMoxfield() {
                 </div>
               </div>
             )}
-            
+
             {stats && (
               <div className="bg-slate-700 rounded-lg p-4 space-y-2">
                 <h3 className="font-semibold text-white mb-3">Resumen de la colección:</h3>
                 <div className="grid grid-cols-2 gap-2 text-sm">
-                  <div className="flex justify-between text-slate-300">
-                    <span>⚪ Blanco:</span>
-                    <span className="font-mono">{stats.blanco}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300">
-                    <span>🔵 Azul:</span>
-                    <span className="font-mono">{stats.azul}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300">
-                    <span>⚫ Negro:</span>
-                    <span className="font-mono">{stats.negro}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300">
-                    <span>🔴 Rojo:</span>
-                    <span className="font-mono">{stats.rojo}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300">
-                    <span>🟢 Verde:</span>
-                    <span className="font-mono">{stats.verde}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300">
-                    <span>🌈 Multicolor:</span>
-                    <span className="font-mono">{stats.multicolor}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-300 col-span-2">
-                    <span>⚪ Incoloro:</span>
-                    <span className="font-mono">{stats.incoloro}</span>
-                  </div>
+                  <div className="flex justify-between text-slate-300"><span>⚪ Blanco:</span><span className="font-mono">{stats.blanco}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>🔵 Azul:</span><span className="font-mono">{stats.azul}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>⚫ Negro:</span><span className="font-mono">{stats.negro}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>🔴 Rojo:</span><span className="font-mono">{stats.rojo}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>🟢 Verde:</span><span className="font-mono">{stats.verde}</span></div>
+                  <div className="flex justify-between text-slate-300"><span>🌈 Multicolor:</span><span className="font-mono">{stats.multicolor}</span></div>
+                  <div className="flex justify-between text-slate-300 col-span-2"><span>⚪ Incoloro:</span><span className="font-mono">{stats.incoloro}</span></div>
                   {stats['no-catalogadas'] > 0 && (
                     <div className="flex justify-between text-yellow-300 col-span-2 border-t border-slate-600 pt-2 mt-2">
-                      <span>❓ No catalogadas:</span>
-                      <span className="font-mono">{stats['no-catalogadas']}</span>
+                      <span>❓ No catalogadas:</span><span className="font-mono">{stats['no-catalogadas']}</span>
                     </div>
                   )}
                 </div>
               </div>
             )}
-            
+
             {downloadLinks.length > 0 && (
               <div className="bg-slate-700 rounded-lg p-4 space-y-3">
                 <h3 className="font-semibold text-white mb-3">📥 Archivos generados - Haz clic para descargar:</h3>
                 <div className="space-y-2">
                   {downloadLinks.map((link, index) => {
                     const colorEmoji = {
-                      blanco: '⚪',
-                      azul: '🔵',
-                      negro: '⚫',
-                      rojo: '🔴',
-                      verde: '🟢',
-                      multicolor: '🌈',
-                      incoloro: '⚪',
-                      'no-catalogadas': '❓'
+                      blanco: '⚪', azul: '🔵', negro: '⚫', rojo: '🔴', verde: '🟢',
+                      multicolor: '🌈', incoloro: '⚪', 'no-catalogadas': '❓'
                     };
-                    
                     return (
                       <button
                         key={index}
@@ -656,7 +583,7 @@ function ManaboxToMoxfield() {
                 </p>
               </div>
             )}
-            
+
             {error && (
               <div className="bg-red-900/50 border border-red-700 rounded-lg p-4 flex items-start gap-3">
                 <i data-lucide="alert-circle" className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5"></i>
@@ -670,10 +597,8 @@ function ManaboxToMoxfield() {
   );
 }
 
-// Renderizar la aplicación
 ReactDOM.render(<ManaboxToMoxfield />, document.getElementById('root'));
 
-// Inicializar iconos de Lucide después del render
 setTimeout(() => {
   if (window.lucide) {
     lucide.createIcons();
