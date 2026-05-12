@@ -64,9 +64,9 @@ function ManaboxToMoxfield() {
       // Paso 1: obtener lista de bulk data
       const bulkData = await fetchAndParseJSON('https://api.scryfall.com/bulk-data', null);
       
-      // Usar oracle_cards (~20MB) — una entrada por carta única, suficiente para color_identity
-      const oracleCards = bulkData.data.find(item => item.type === 'oracle_cards');
-      if (!oracleCards) throw new Error('No se encontró oracle_cards en la API de Scryfall');
+      // Usar default_cards — todas las impresiones, máxima cobertura
+      const oracleCards = bulkData.data.find(item => item.type === 'default_cards'); // ~500MB
+      if (!oracleCards) throw new Error('No se encontró default_cards en la API de Scryfall');
 
       const sizeMB = oracleCards.size ? Math.round(oracleCards.size / 1024 / 1024) : '~20';
       setProgress(`Descargando base de datos (~${sizeMB}MB)... 0%`);
