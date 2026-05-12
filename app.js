@@ -14,7 +14,7 @@ function ManaboxToMoxfield() {
   const [cardCollectorIndex, setCardCollectorIndex] = useState(null);
   const [dbLoading, setDbLoading] = useState(false);
 
-  // ─── FIX #2: leer como text() primero, luego JSON.parse ───────────────────
+  // FIX PRINCIPAL: usar oracle_cards (~20MB) en lugar de default_cards (~500MB)
   const loadScryfallDatabaseAuto = async () => {
     setDbLoading(true);
     setError('');
@@ -25,16 +25,18 @@ function ManaboxToMoxfield() {
       if (!bulkResponse.ok) throw new Error('No se pudo conectar con Scryfall');
 
       const bulkData = await bulkResponse.json();
-      const defaultCards = bulkData.data.find(item => item.type === 'default_cards');
-      if (!defaultCards) throw new Error('No se pudo encontrar la base de datos de cartas');
 
-      setProgress('Descargando base de datos completa... esto puede tardar 1-2 minutos (~100MB)');
+      // oracle_cards: ~20MB vs default_cards: ~500MB
+      const oracleCards = bulkData.data.find(item => item.type === 'oracle_cards');
+      if (!oracleCards) throw new Error('No se pudo encontrar oracle_cards en Scryfall');
 
-      const cardsResponse = await fetch(defaultCards.download_uri);
+      const sizeMB = Math.round(oracleCards.size / 1024 / 1024);
+      setProgress(`Descargando base de datos liviana... (~${sizeMB}MB, unos segundos)`);
+
+      const cardsResponse = await fetch(oracleCards.download_uri);
       if (!cardsResponse.ok) throw new Error('Error al descargar la base de datos');
 
-      // FIX: leer como texto primero para evitar que el stream se corte
-      setProgress('Leyendo datos... (archivo grande, por favor espera)');
+      setProgress('Leyendo datos...');
       const rawText = await cardsResponse.text();
 
       setProgress('Procesando base de datos...');
@@ -42,7 +44,7 @@ function ManaboxToMoxfield() {
       try {
         cardsData = JSON.parse(rawText);
       } catch (parseErr) {
-        throw new Error('El archivo descargado está incompleto o corrupto. Intenta de nuevo o usa la Opción B.');
+        throw new Error('El archivo descargado está incompleto. Intenta de nuevo o usa la Opción B.');
       }
 
       buildIndexes(cardsData);
@@ -54,7 +56,6 @@ function ManaboxToMoxfield() {
     }
   };
 
-  // ─── FIX #1: usar FileReader en lugar de file.text() ──────────────────────
   const handleDatabaseUpload = (event) => {
     const dbFile = event.target.files[0];
     if (!dbFile) return;
@@ -79,12 +80,9 @@ function ManaboxToMoxfield() {
     };
 
     reader.readAsText(dbFile);
-
-    // Resetear el input para que se pueda volver a seleccionar el mismo archivo
     event.target.value = '';
   };
 
-  // ─── Función compartida de indexación ─────────────────────────────────────
   const buildIndexes = (cardsData) => {
     const colorMap = {};
     const nameIndex = {};
@@ -325,7 +323,6 @@ function ManaboxToMoxfield() {
     setProcessing(false);
   };
 
-  // ─── FIX #1 también aplica aquí: usar FileReader para el archivo Manabox ──
   const processFile = async () => {
     if (!file || !cardDatabase) return;
 
@@ -421,7 +418,7 @@ function ManaboxToMoxfield() {
                           <h4 className="text-white font-semibold text-sm">Opción A: Descarga Automática (Recomendado)</h4>
                         </div>
                         <p className="text-slate-300 text-xs mb-3">
-                          Descarga la base de datos directamente desde Scryfall. Requiere buena conexión a internet.
+                          Descarga la base de datos liviana desde Scryfall (~20MB, rápido).
                         </p>
                         <button
                           onClick={loadScryfallDatabaseAuto}
@@ -443,8 +440,8 @@ function ManaboxToMoxfield() {
                         </p>
                         <ol className="text-slate-300 text-xs mb-3 ml-4 space-y-1 list-decimal">
                           <li>Haz clic en el enlace de abajo</li>
-                          <li>Busca "Default Cards" en la tabla</li>
-                          <li>Haz clic en "Download" para descargar el JSON</li>
+                          <li>Busca <strong>"Oracle Cards"</strong> en la tabla (NO Default Cards)</li>
+                          <li>Haz clic en "Download" para descargar el JSON (~20MB)</li>
                           <li>Sube el archivo aquí</li>
                         </ol>
                         <a
