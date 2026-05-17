@@ -234,7 +234,7 @@ function ManaboxToMoxfield() {
     const cards = [];
 
     lines.forEach(line => {
-      const match = line.match(/^(\d+)\s+(.+?)\s+\(([^)]+)\)\s+(\d+)(.*)$/);
+      const match = line.match(/^(\d+)\s+(.+?)\s+\(([^)]+)\)\s+(\S+)(.*)$/);
       if (match) {
         const [, quantity, name, setCode, collectorNumber, rest] = match;
         const isFoil = rest.includes('*F*');
